@@ -145,12 +145,12 @@ def _resolver(result):
 def test_host_resolves_true_when_dns_answers():
     loop_patch = patch("asyncio.BaseEventLoop.getaddrinfo", new=_resolver([("addr",)]))
     with loop_patch:
-        assert asyncio.run(util.host_resolves("http://magicboxie.lan")) is True
+        assert asyncio.run(util.host_resolves("http://magicboxie.local")) is True
 
 
 def test_host_resolves_false_when_dns_fails():
     with patch("asyncio.BaseEventLoop.getaddrinfo", new=_resolver(OSError("no such host"))):
-        assert asyncio.run(util.host_resolves("http://magicboxie.lan")) is False
+        assert asyncio.run(util.host_resolves("http://magicboxie.local")) is False
 
 
 def test_host_resolves_false_for_an_empty_url():

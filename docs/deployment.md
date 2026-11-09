@@ -390,7 +390,7 @@ and its listener over SSH.
 
 ## Downloading movies from the home server
 
-The home server's name (default `http://magicboxie.lan`) only resolves on the
+The home server's name (default `http://magicboxie.local`) only resolves on the
 Mitera network. The device tests whether it resolves every 15 seconds, so a
 sync starts soon after joining Mitera (by Wi-Fi or Ethernet) and nothing is
 attempted elsewhere. Once it resolves, the device checks in every minute and

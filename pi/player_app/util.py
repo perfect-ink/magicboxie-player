@@ -48,7 +48,7 @@ async def sleep_unless_stopped(stop_event: asyncio.Event, seconds: float) -> Non
 
 async def host_resolves(url: str, timeout: float = 3.0) -> bool:
     """Whether the host in `url` currently resolves in DNS. The home server
-    (magicboxie.lan) only exists on the home network, so this is a cheap
+    (magicboxie.local, an mDNS name) only exists on the home network, so this is a cheap
     "are we on that network" test that needs no SSID or interface knowledge
     and also works over Ethernet. False on any failure or timeout."""
     host = urlsplit(url).hostname

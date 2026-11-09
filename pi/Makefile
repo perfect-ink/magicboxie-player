@@ -5,7 +5,7 @@ THUMBNAIL_DIR := /var/lib/magicboxie/thumbnails
 TRANSCODE_DIR := /var/lib/magicboxie/transcoded
 # MagicBoxie-web's LAN hostname - see player_app/services/home_sync_service.py.
 # Override (e.g. to empty) for a device with no home server to sync with.
-HOME_SERVER_URL := http://magicboxie.lan
+HOME_SERVER_URL := http://magicboxie.local
 # The home server login lives in a root-readable file outside Git, loaded by
 # the unit (EnvironmentFile), so redeploys and self-updates never lose it. It
 # is seeded once with the default below (a deliberately low-security home
@@ -86,7 +86,7 @@ setup: not-media-server sparse-refresh
 		mpv ffmpeg libjpeg-dev zlib1g-dev \
 		fonts-dejavu-core \
 		bluez dbus \
-		curl network-manager dnsmasq-base iw avahi-daemon
+		curl network-manager dnsmasq-base iw avahi-daemon libnss-mdns
 	@if [ "$$(hostname)" != "magicboxie-player" ]; then \
 		echo "Setting hostname to magicboxie-player (reachable as magicboxie-player.local via Avahi)..."; \
 		sudo hostnamectl set-hostname magicboxie-player; \
