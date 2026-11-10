@@ -16,3 +16,9 @@ Type=oneshot
 User=@USER@
 WorkingDirectory=@REPO_DIR@
 ExecStart=/usr/bin/make -C @REPO_DIR@ self-update
+# Runs right after boot whenever Wi-Fi connects, while the movie is starting:
+# lower priority so the git pull doesn't slow that down. Not idle-only like
+# boot-update, so an install that stopped the movie still finishes promptly.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

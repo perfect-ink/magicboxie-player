@@ -31,7 +31,7 @@ BOOT_UPDATE_SERVICE_FILE := /etc/systemd/system/$(BOOT_UPDATE_NAME).service
 # The player never installs there - see not-media-server.
 MEDIA_SERVER_MARKERS := $(wildcard /etc/magicboxie/docker.yaml /var/lib/magicboxie-docker)
 
-.PHONY: deploy pull install setup seed-movies run test service start stop \
+.PHONY: deploy boot-times pull install setup seed-movies run test service start stop \
 	restart redeploy self-update self-update-service logs \
 	uninstall clean wifi-service wifi-start sudoers sparse-refresh boot-update repair-checkout \
 	not-media-server remove-from-media-server
@@ -106,6 +106,13 @@ setup: not-media-server sparse-refresh
 	python3 -m venv $(VENV)
 	$(VENV)/bin/pip install --upgrade pip
 	$(VENV)/bin/pip install -e .
+	@# Bytecode now, so the first boot after an update doesn't compile it on the way to playing.
+	-$(VENV)/bin/python -m compileall -q player_app web
+	@# Daily OS jobs a device that is mostly unplugged runs right after nearly every
+	@# boot (their timers catch up on missed runs), fighting the player for the CPU
+	@# and SD card: rebuilding the man page index, and apt's own refresh and
+	@# upgrade (magicboxie-apt-update.timer refreshes package lists monthly instead).
+	-sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer man-db.timer 2>/dev/null
 	sudo mkdir -p $(THUMBNAIL_DIR) $(TRANSCODE_DIR) $(CONTENT_DIR)
 	sudo chown "$$(whoami)" $(THUMBNAIL_DIR) $(TRANSCODE_DIR) $(CONTENT_DIR)
 	sudo install -d -m 700 -o "$$(whoami)" /var/lib/magicboxie
@@ -349,6 +356,14 @@ boot-update:
 
 logs:
 	journalctl -u $(SERVICE_NAME) -f
+
+# Where the last boot spent its time: the OS overall, the slowest units, what
+# the player waited on, and the player's own startup milestones.
+boot-times:
+	@systemd-analyze || true
+	@echo; echo "Slowest units:"; systemd-analyze blame --no-pager | head -15
+	@echo; systemd-analyze critical-chain --no-pager $(SERVICE_NAME) || true
+	@echo; echo "Player startup:"; journalctl -b -u $(SERVICE_NAME) --no-pager -o short-monotonic | grep -E "Startup:|Started|mpv would not" || true
 
 uninstall:
 	sudo systemctl disable --now magicboxie-apt-update.timer 2>/dev/null || true

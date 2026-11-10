@@ -3,7 +3,11 @@
 # Runs the daemon natively on the Pi: BLE + HDMI/DRM output, no Docker.
 [Unit]
 Description=MagicBoxie player daemon
-After=bluetooth.target network.target dbus.service
+# Not ordered after bluetooth.target or network.target: the movie on HDMI
+# needs neither, BLE setup retries until BlueZ is up, and the web server
+# listens on all interfaces whenever they appear. Waiting for them only
+# delayed the first frame.
+After=dbus.service
 Wants=bluetooth.target
 
 [Service]

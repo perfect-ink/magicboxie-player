@@ -65,6 +65,27 @@ PLAYBACK_TUNING = {
     "sigmoid-upscaling": False,
 }
 
+# Startup-only flags that skip what this player never uses: the on-screen
+# controller, youtube-dl lookup, the stats and console overlays, profile
+# auto-switching (each of those is a Lua script mpv starts on launch), user
+# scripts, and the default key bindings (keys come in through evdev, see
+# services/keyboard_service.py). Less for mpv to load on the Pi Zero before
+# its IPC socket is up. The osd-overlay drawings (pause icon, notes) are
+# built in and don't need the OSC.
+LEAN_STARTUP_ARGS = (
+    "--osc=no",
+    "--ytdl=no",
+    "--load-scripts=no",
+    "--load-stats-overlay=no",
+    "--load-osd-console=no",
+    "--load-auto-profiles=no",
+    "--input-default-bindings=no",
+)
+
+
+class _MpvExitedEarly(Exception):
+    pass
+
 
 class MpvController:
     def __init__(self, socket_path: str = "/tmp/magicboxie-mpv.sock", extra_args: Optional[List[str]] = None):
@@ -87,6 +108,15 @@ class MpvController:
         return self._loading
 
     async def start(self) -> None:
+        try:
+            await self._launch(LEAN_STARTUP_ARGS)
+        except _MpvExitedEarly:
+            # An mpv too old for one of the lean flags refuses to start at
+            # all: start it the way it always was instead.
+            logger.warning("mpv would not start with %s - starting it without them", " ".join(LEAN_STARTUP_ARGS))
+            await self._launch(())
+
+    async def _launch(self, lean_args) -> None:
         socket_path = Path(self._socket_path)
         if socket_path.exists():
             socket_path.unlink()
@@ -97,6 +127,7 @@ class MpvController:
             "--force-window=no",
             "--no-terminal",
             f"--input-ipc-server={self._socket_path}",
+            *lean_args,
             *self._extra_args,
             stdout=asyncio.subprocess.DEVNULL,
             # Piped (not DEVNULL) and drained by _log_stderr for the life of
@@ -112,6 +143,9 @@ class MpvController:
             if socket_path.exists():
                 break
             if self._process.returncode is not None:
+                if lean_args:
+                    await asyncio.gather(self._stderr_task, return_exceptions=True)
+                    raise _MpvExitedEarly()
                 raise RuntimeError(f"mpv exited immediately with code {self._process.returncode} - see logs above for its stderr")
             await asyncio.sleep(0.1)
         else:

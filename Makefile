@@ -1,6 +1,6 @@
 IMAGE := magicboxie-player
 MOVIES_DIR := movies
-.PHONY: all setup dev build test clean seed-movies pi pi-ssh-deploy pi-ssh-logs
+.PHONY: all setup dev build test clean seed-movies pi pi-ssh-deploy pi-ssh-logs pi-ssh-boot-times
 
 all: dev
 
@@ -83,3 +83,6 @@ pi-ssh-deploy:
 
 pi-ssh-logs:
 	ssh $(PI_HOST) 'cd $(PI_DIR) && make logs'
+
+pi-ssh-boot-times:
+	ssh $(PI_HOST) 'cd $(PI_DIR) && make -C pi boot-times'

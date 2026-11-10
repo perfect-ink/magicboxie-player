@@ -16,13 +16,15 @@ here in the background, only while idle and cool (services/transcode_service.py)
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import importlib
 import logging
 import os
 import signal
+import time
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, Awaitable, Callable, List, Optional, Sequence
 
-from .controllers.playback_controller import PlaybackController
 from .display import display_mode, is_standard_definition
 from .models.library import MovieLibrary
 from .views.player import MpvController
@@ -30,7 +32,12 @@ from .update_status import read_message, read_status
 from .storage import run_io
 from .util import host_resolves, local_ip, sleep_unless_stopped
 
+if TYPE_CHECKING:
+    from .controllers.playback_controller import PlaybackController
+
 logger = logging.getLogger(__name__)
+
+_STARTED_AT = time.monotonic()
 
 DEVICE_NAME = "MagicBoxiePlayer"
 MOVIES_DIR = Path(os.environ.get("MAGICBOXIE_MOVIES_DIR", "/movies"))
@@ -82,6 +89,51 @@ HOME_SERVER_RESOLVE_RETRY_SECONDS = 15
 # How long each movie stays up in the SD idle screen's slideshow.
 SLIDESHOW_SECONDS = 8
 
+# Imported (with Pillow) in a thread while mpv brings up HDMI, instead of
+# before mpv is even launched.
+_CONTROLLER_MODULE = f"{__package__}.controllers.playback_controller"
+# What the network and background workers import. On the Pi Zero these take
+# seconds, and importing them on the event loop held up resuming the movie,
+# so they are imported in a thread while mpv is still starting.
+_WORKER_MODULES = (
+    "aiohttp.web",
+    "web.web_service",
+    f"{__package__}.services.keyboard_service",
+    f"{__package__}.services.mdns_service",
+    f"{__package__}.services.home_sync_service",
+    f"{__package__}.services.transcode_service",
+    f"{__package__}.services.thermal_service",
+    f"{__package__}.services.idle_dim_service",
+    f"{__package__}.services.ble_service",
+    "bluez_peripheral.advert",
+    "bluez_peripheral.agent",
+    "bluez_peripheral.util",
+    "dbus_next.errors",
+)
+# The network and background workers start once the previous movie is
+# resumed (or the idle screen is decided), so the movie reaches the screen
+# first. This caps the wait, e.g. while an update holds the resume back.
+WORKER_START_MAX_WAIT_SECONDS = 10
+
+
+def _log_startup(step: str) -> None:
+    """One line per startup milestone, to compare boots in `make logs`."""
+    try:
+        since_boot = f", {time.clock_gettime(time.CLOCK_BOOTTIME):.1f}s since boot"
+    except (AttributeError, OSError):
+        since_boot = ""
+    logger.info("Startup: %s after %.1fs%s", step, time.monotonic() - _STARTED_AT, since_boot)
+
+
+def _import_quietly(modules: Sequence[str]) -> None:
+    for name in modules:
+        try:
+            importlib.import_module(name)
+        except Exception:
+            # Optional on this machine (no BlueZ in dev); the worker that
+            # needs it reports the error itself.
+            pass
+
 
 def _mpv_output_args() -> List[str]:
     # Defaults target rendering straight to the framebuffer via DRM/KMS - the
@@ -117,8 +169,11 @@ async def _run() -> None:
     tasks = []
     workers_done = None
     stopped = None
+    preload = None
     try:
-        await _prepare_startup(library, player)
+        preload = await _prepare_startup(library, player, preload_modules=_WORKER_MODULES)
+        _log_startup("mpv and library ready")
+        from .controllers.playback_controller import PlaybackController
         controller = await run_io(PlaybackController, library, player, state_path=PLAYBACK_STATE_PATH)
         if stop_event.is_set():
             return
@@ -128,22 +183,28 @@ async def _run() -> None:
             # PlaybackController.home_server_pending).
             from .services.home_sync_service import SyncActivity
             controller.sync_activity = SyncActivity()
+
+        def after_startup(start: Callable[[], Awaitable[None]]) -> Awaitable[None]:
+            return _start_after_startup(start, startup_decided, preload, stop_event)
+
+        # Resuming the movie goes first; everything that imports or sets up
+        # network services waits for it (see WORKER_START_MAX_WAIT_SECONDS).
         workers = [
-            _run_http(controller, stop_event),
-            _run_keyboard(controller, stop_event),
-            _run_status_message(controller, stop_event, startup_decided),
-            _run_mdns(stop_event),
             _run_library_scan(controller, stop_event, startup_decided, prepared=True),
             _run_playback(controller, stop_event),
-            _run_idle_dim(controller, stop_event),
-            _run_thermal(controller, stop_event),
-            _run_transcode(controller, stop_event),
+            _run_status_message(controller, stop_event, startup_decided),
             _run_slideshow(controller, stop_event, startup_decided),
+            after_startup(lambda: _run_http(controller, stop_event)),
+            after_startup(lambda: _run_keyboard(controller, stop_event)),
+            after_startup(lambda: _run_mdns(stop_event)),
+            after_startup(lambda: _run_idle_dim(controller, stop_event)),
+            after_startup(lambda: _run_thermal(controller, stop_event)),
+            after_startup(lambda: _run_transcode(controller, stop_event)),
         ]
         if TRANSPORT != "http":
-            workers.append(_run_ble(controller, stop_event))
+            workers.append(after_startup(lambda: _run_ble(controller, stop_event)))
         if HOME_SERVER_URL:
-            workers.append(_run_home_sync(controller, stop_event))
+            workers.append(after_startup(lambda: _run_home_sync(controller, stop_event)))
         tasks = [asyncio.create_task(worker) for worker in workers]
         workers_done = asyncio.gather(*tasks)
         stopped = asyncio.create_task(stop_event.wait())
@@ -155,6 +216,8 @@ async def _run() -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if preload is not None:
+            await asyncio.gather(preload, return_exceptions=True)
         if workers_done is not None:
             await asyncio.gather(workers_done, return_exceptions=True)
         if stopped is not None:
@@ -168,19 +231,49 @@ async def _run() -> None:
         await player.stop_process()
 
 
-async def _prepare_startup(library: MovieLibrary, player: MpvController) -> None:
-    """Overlap mpv/HDMI setup with recovery and the lightweight library scan."""
+async def _prepare_startup(library: MovieLibrary, player: MpvController,
+                           preload_modules: Sequence[str] = ()) -> Optional[asyncio.Task]:
+    """Overlap mpv/HDMI setup with recovery and the lightweight library scan.
+
+    Once the library is ready, and usually while mpv is still starting,
+    preload_modules start importing in a thread. Returns that import's task
+    (None if there was nothing to import) for the workers to wait on."""
+    preload: Optional[asyncio.Task] = None
+
     async def prepare_library():
+        nonlocal preload
+        await asyncio.to_thread(_import_quietly, (_CONTROLLER_MODULE,))
         await run_io(library.cleanup_partial_files)
         await run_io(library.scan, fast=True)
+        if preload_modules:
+            preload = asyncio.create_task(asyncio.to_thread(_import_quietly, preload_modules))
 
     tasks = [asyncio.create_task(player.start()), asyncio.create_task(prepare_library())]
     try:
         await asyncio.gather(*tasks)
+    except BaseException:
+        if preload is not None:
+            await asyncio.gather(preload, return_exceptions=True)
+        raise
     finally:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+    return preload
+
+
+async def _start_after_startup(start: Callable[[], Awaitable[None]], startup_decided: asyncio.Event,
+                               preload: Optional[asyncio.Task], stop_event: asyncio.Event) -> None:
+    """Runs start() once startup has resumed the movie (or settled on the
+    idle screen), or after WORKER_START_MAX_WAIT_SECONDS at most, and once
+    the background imports are done (importing the same module on the event
+    loop meanwhile would block it until the thread finished anyway)."""
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(startup_decided.wait(), WORKER_START_MAX_WAIT_SECONDS)
+    if preload is not None:
+        await asyncio.gather(asyncio.shield(preload), return_exceptions=True)
+    if not stop_event.is_set():
+        await start()
 
 
 async def _run_http(controller: PlaybackController, stop_event: asyncio.Event) -> None:
@@ -252,6 +345,7 @@ async def _run_library_scan(controller: PlaybackController, stop_event: asyncio.
             await sleep_unless_stopped(stop_event, 1)
         if not stop_event.is_set():
             await controller.resume_on_startup()
+            _log_startup("resumed the last movie" if not controller.is_idle else "nothing to resume")
     finally:
         startup_decided.set()
     if controller.is_idle and not stop_event.is_set():

@@ -107,3 +107,84 @@ def test_playback_persistence_does_not_block_event_loop(tmp_path):
                 release.set()
                 await task
     asyncio.run(scenario())
+
+
+def test_workers_wait_for_startup_to_resume_the_movie():
+    from player_app.main import _start_after_startup
+
+    async def scenario():
+        startup_decided = asyncio.Event()
+        stop_event = asyncio.Event()
+        started = asyncio.Event()
+
+        async def worker():
+            started.set()
+
+        task = asyncio.create_task(_start_after_startup(worker, startup_decided, None, stop_event))
+        await asyncio.sleep(0.05)
+        assert not started.is_set()
+        startup_decided.set()
+        await asyncio.wait_for(task, 1)
+        assert started.is_set()
+    asyncio.run(scenario())
+
+
+def test_workers_start_anyway_when_startup_takes_too_long():
+    from player_app import main
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def worker():
+            started.set()
+
+        with patch.object(main, "WORKER_START_MAX_WAIT_SECONDS", 0.05):
+            await asyncio.wait_for(
+                main._start_after_startup(worker, asyncio.Event(), None, asyncio.Event()), 1)
+        assert started.is_set()
+    asyncio.run(scenario())
+
+
+def test_workers_wait_for_background_imports_and_skip_after_stop():
+    from player_app.main import _start_after_startup
+
+    async def scenario():
+        release = threading.Event()
+        preload = asyncio.create_task(asyncio.to_thread(release.wait, 2))
+        decided = asyncio.Event()
+        decided.set()
+        stop_event = asyncio.Event()
+        started = []
+
+        async def worker():
+            started.append(True)
+
+        task = asyncio.create_task(_start_after_startup(worker, decided, preload, stop_event))
+        await asyncio.sleep(0.05)
+        assert not started
+        stop_event.set()
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert not started
+    asyncio.run(scenario())
+
+
+def test_prepare_startup_imports_worker_modules_in_background():
+    async def scenario():
+        class Library:
+            def cleanup_partial_files(self):
+                pass
+
+            def scan(self, *, fast):
+                pass
+
+        class Player:
+            async def start(self):
+                pass
+
+        preload = await asyncio.wait_for(
+            _prepare_startup(Library(), Player(), preload_modules=("json", "no_such_module_here")), 2)
+        assert preload is not None
+        await asyncio.wait_for(preload, 2)
+        assert await _prepare_startup(Library(), Player()) is None
+    asyncio.run(scenario())
